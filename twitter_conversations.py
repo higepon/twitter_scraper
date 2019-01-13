@@ -1,10 +1,14 @@
 import argparse
+import http.client
 import re
+import socket
 import sqlite3
 import sys
+import time
 from enum import Enum
 
 import tweepy
+import urllib3
 import yaml
 from tweepy import OAuthHandler, Stream
 from tweepy.streaming import StreamListener
@@ -42,12 +46,12 @@ class QueueListener(StreamListener):
                                    cfg['access_token_secret'])
         self.api = tweepy.API(self.auth)
         self.db = args.db
+        self.lang = args.lang
         self.sids_to_lookup = []
         self.tasks = {}
 
-    @staticmethod
-    def is_ja_tweet(status):
-        return status.user.lang == 'ja'
+    def is_target_lang_tweet(self, status):
+        return status.user.lang == self.lang
 
     @staticmethod
     def has_in_reply_to(status):
@@ -63,9 +67,12 @@ class QueueListener(StreamListener):
             statues = self.api.statuses_lookup(self.sids_to_lookup)
             self.sids_to_lookup = []
             for status in statues:
-                task = self.tasks[status.id]
-                del self.tasks[status.id]
-                self.handle_task(task, status)
+                if status.id in self.tasks:
+                    task = self.tasks[status.id]
+                    del self.tasks[status.id]
+                    self.handle_task(task, status)
+                else:
+                    print("waring not found")
 
     def handle_task(self, task, status):
         if task.state == TaskState.WAITING_STATUS2:
@@ -92,7 +99,7 @@ class QueueListener(StreamListener):
                                          task.status3)
 
     def on_status(self, status3):
-        if self.is_ja_tweet(status3) and self.has_in_reply_to(status3):
+        if self.is_target_lang_tweet(status3) and self.has_in_reply_to(status3):
             self.add_task(status3)
 
     def print_conversation(self, status1, status2, status3):
@@ -167,12 +174,31 @@ def main():
                         help='config file path')
     parser.add_argument('--db', type=str, required=True,
                         help='path to sqlite3 db')
+    parser.add_argument('--lang', type=str, required=True,
+                        help='target language')
     args = parser.parse_args()
 
     listener = QueueListener(args)
     stream = Stream(listener.auth, listener)
     print("Listening...\n")
-    stream.sample()
+    delay = 0.25
+    try:
+        while True:
+            try:
+                stream.sample()
+            except KeyboardInterrupt:
+                print('Stopped')
+                return
+            except urllib3.exceptions.ProtocolError as e:
+                print("Incomplete read", e)
+            except urllib3.exceptions.ReadTimeoutError as e:
+                print("Read Timeout", e)
+            except (socket.error, http.client.HTTPException):
+                print("HTTP error waiting for a few seconds")
+                time.sleep(delay)
+                delay += 0.25
+    finally:
+        stream.disconnect()
 
 
 if __name__ == '__main__':
